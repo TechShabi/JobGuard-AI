@@ -1,0 +1,58 @@
+{
+  "name": "scam-detector-backend",
+  "version": "1.0.0",
+  "description": "AI-powered scam detection backend with URL, text, and media analysis",
+  "main": "app.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node app.js",
+    "dev": "nodemon app.js",
+    "lint": "echo \"No lint configured\"",
+    "test:opportunity": "node tests/opportunity-discovery.test.js && node tests/opportunity-integration.test.js && node tests/opportunity-search-match.test.js",
+    "test:admin": "node tests/admin-authorization.test.js",
+    "test:membership": "node tests/membership-interest.test.js && node tests/payments-disabled-gate.test.js && node tests/starter-core-access.test.js"
+  },
+  "keywords": [
+    "scam-detection",
+    "cybersecurity",
+    "ai",
+    "gemini",
+    "fraud-detection"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "axios": "^1.18.1",
+    "bcryptjs": "^3.0.3",
+    "cheerio": "^1.2.0",
+    "compression": "^1.8.1",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.5.2",
+    "express-validator": "^7.3.2",
+    "fs-extra": "^11.3.5",
+    "helmet": "^8.2.0",
+    "hpp": "^0.2.3",
+    "jsonwebtoken": "^9.0.3",
+    "jszip": "^3.10.1",
+    "morgan": "^1.11.0",
+    "multer": "^2.2.0",
+    "mammoth": "^1.8.0",
+    "mysql2": "^3.22.5",
+    "node-fetch": "^3.3.2",
+    "pdf-parse": "^1.1.1",
+    "sequelize": "^6.37.8",
+    "tesseract.js": "^7.0.0",
+    "tldts": "^7.4.3",
+    "validator": "^13.15.35",
+    "word-extractor": "^1.0.4",
+    "xss": "^1.0.15",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
+  }
+}
