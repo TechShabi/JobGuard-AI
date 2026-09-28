@@ -60,7 +60,7 @@ const safeParse = (text) => {
 // =====================
 const callGemini = async (prompt, history = []) => {
   const model = genAI.getGenerativeModel({
-    model: "gemini-3.8-live",
+    model: "gemini-3.6-flash",
   });
 
   // `history` is an extension point for future turn-based/conversational AI
@@ -364,7 +364,7 @@ exports.discoverOpportunitiesGrounded = async (query = {}) => {
     await waitIfNeeded();
 
     const model = genAI.getGenerativeModel({
-      model: "gemini-3.8-live",
+      model: "gemini-3.6-flash",
       tools: [{ googleSearch: {} }],
     });
 

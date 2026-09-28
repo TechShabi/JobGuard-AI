@@ -313,7 +313,11 @@ exports.next = async (req, res) => {
       return safeError(res, 400, "This interview has already ended.");
     }
 
-    const questions = Array.isArray(session.questions) ? [...session.questions] : [];
+     const questions = Array.isArray(session.questions)
+    ? [...session.questions]
+    : typeof session.questions === "string"
+      ? JSON.parse(session.questions)
+      : [];
     if (!questions.length) return safeError(res, 400, "No pending question on this session.");
 
     // Fill in the answer to the pending (last) question.
