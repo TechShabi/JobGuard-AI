@@ -1,7 +1,28 @@
-const { GoogleGenerativeAI } = require("@google/generative-ai");
+/**
+ * OpenAI AI Service — PRIMARY / DEFAULT provider implementation.
+ *
+ * Ported from services/geminiService.js: same business logic, same
+ * prompts, same JSON schemas/validation/fallback behavior for every
+ * function below — only the low-level "talk to the model" call
+ * (callOpenAI, formerly callGemini) and the Opportunity discovery
+ * function (discoverOpportunitiesWebSearch, formerly the Gemini-
+ * Search-grounded discoverOpportunitiesGrounded) changed. See
+ * services/aiService.js for the provider-selection abstraction that
+ * sits in front of this file and services/geminiService.js.
+ */
+const axios = require("axios");
+const {
+  OPENAI_API_KEY,
+  OPENAI_MODEL,
+  OPENAI_WEB_SEARCH_MODEL,
+  OPENAI_BASE_URL,
+  OPENAI_TIMEOUT_MS,
+  OPENAI_WEB_SEARCH_TIMEOUT_MS,
+  OPENAI_WEB_SEARCH_TOOL_TYPE,
+  isConfigured,
+  isWebSearchEnabled,
+} = require("../config/openai");
 require("dotenv").config();
-
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // =====================
 // RATE LIMITER (RPM)
@@ -56,48 +77,56 @@ const safeParse = (text) => {
 };
 
 // =====================
-// GEMINI CALL HELPER
+// OPENAI CALL HELPER (JSON-mode, non-web-search generation)
 // =====================
-const callGemini = async (prompt, history = []) => {
-  const model = genAI.getGenerativeModel({
-    model: "gemini-3.8-live",
-  });
+// Every plain analysis/generation function in this file (resume review,
+// interview questions/report, scam verification, relevance explanation,
+// etc.) goes through this ONE function — same shape/contract as the old
+// callOpenAI(prompt, history), so none of the business logic below (the
+// prompts, JSON schemas, retry/fallback handling) needed to change.
+//
+// This deliberately does NOT use OpenAI's web-search tool — that is a
+// clearly separate code path (discoverOpportunitiesWebSearch, below) so
+// "normal AI generation" and "web-grounded Opportunity discovery" can
+// never be confused with each other (product-spec section 4).
+const callOpenAI = async (prompt, history = []) => {
+  if (!isConfigured()) {
+    throw new Error("OPENAI_API_KEY is not configured");
+  }
 
-  // `history` is an extension point for future turn-based/conversational AI
-  // flows (e.g. an Interview Simulator that asks real follow-up questions,
-  // or a future Career Coach). It is OPTIONAL and unused by every caller
-  // today — passing nothing preserves the exact single-shot behavior this
-  // function has always had. A caller that wants memory later just passes
-  // previously exchanged turns in Gemini's own shape:
-  //   [{ role: "user" | "model", parts: [{ text: "..." }] }, ...]
-  const contents = [
-    ...history,
-    {
-      role: "user",
-      parts: [
-        {
-          text: prompt,
-        },
-      ],
-    },
+  // `history` mirrors the Gemini-era shape this file's callers already use
+  // — [{ role: "user" | "model", parts: [{ text }] }] — translated here
+  // into OpenAI chat message shape so no caller needed to change.
+  const messages = [
+    ...history.map((turn) => ({
+      role: turn.role === "model" ? "assistant" : "user",
+      content: (turn.parts || []).map((p) => p.text).join("\n"),
+    })),
+    { role: "user", content: prompt },
   ];
 
-  const result = await model.generateContent({
-    contents,
-    generationConfig: {
-      responseMimeType: "application/json",
+  const response = await axios.post(
+    `${OPENAI_BASE_URL}/chat/completions`,
+    {
+      model: OPENAI_MODEL,
+      messages,
       temperature: 0.2,
+      response_format: { type: "json_object" },
     },
-  });
+    {
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      timeout: OPENAI_TIMEOUT_MS,
+    }
+  );
 
-  const response = await result.response;
-
-  let text = response.text();
+  let text = response.data?.choices?.[0]?.message?.content || "";
 
   text = text
     .replace(/```json/gi, "")
     .replace(/```/g, "")
-    .replace(/getParameters/gi, "")
     .trim();
 
   return text;
@@ -182,7 +211,7 @@ exports.analyzeScam = async (content) => {
     await waitIfNeeded();
     console.log("🔄 Gemini analyzing...");
 
-    let text = await callGemini(prompt);
+    let text = await callOpenAI(prompt);
     let parsed = safeParse(text);
 
     // =====================
@@ -194,7 +223,7 @@ exports.analyzeScam = async (content) => {
       await new Promise((r) => setTimeout(r, 2000));
       await waitIfNeeded();
 
-      text = await callGemini(prompt);
+      text = await callOpenAI(prompt);
       parsed = safeParse(text);
 
       if (!parsed) {
@@ -262,186 +291,38 @@ exports.analyzeScam = async (content) => {
 // Lightweight: extracts structured fields only, no scam scoring.
 // =====================================================
 // =====================================================
-// OPPORTUNITY DISCOVERY — Google Search–grounded job search
+// OPPORTUNITY DISCOVERY — OpenAI web-search-grounded job search
 // =====================================================
-// This is intentionally separate from callGemini(): grounding requires
-// `tools: [{ googleSearch: {} }]`, and the Gemini API does NOT allow
-// combining tool use with `responseMimeType: "application/json"` (the API
-// returns 400 "Function calling with a response mime type: 'application/json'
-// is unsupported"). So this asks for JSON as plain text instead and parses
-// it leniently with safeParse(), same as the rest of this file already does
-// for non-strict responses.
+// This is the PRIMARY Opportunity discovery mechanism (product-spec
+// sections 2, 4, 7). It is intentionally a completely separate code path
+// from callOpenAI() (used by every other function in this file): that
+// helper is plain, non-web JSON-mode generation, while this one attaches
+// OpenAI's hosted web_search tool so results are actually grounded in
+// real pages the model retrieved this call - never just the model's own
+// unstated "knowledge" dressed up as a live listing.
 //
-// Honesty guarantee: a listing is only ever reported as "live" if it can be
-// tied back to REAL grounding evidence Gemini's own search grounding
-// metadata returned this call — never just because the model's freeform
-// text said so. Two independent checks are used (see matchToGrounding()):
-//   1. URL match — the row's source_url resolves to the same host as one
-//      of the grounded chunks' URIs.
-//   2. Title match — Google's own grounding chunk carries a human-readable
-//      `web.title` (e.g. "Senior React Developer - Acme Corp | Indeed").
-//      When (1) fails — which happens whenever Google wraps results in a
-//      redirect/proxy URL that shares no host with the real listing — a
-//      case-insensitive company/role match against that title is accepted
-//      as evidence instead, and the row's source_url is REPLACED with the
-//      grounding chunk's own URI (verified data always wins over anything
-//      the model narrated itself, even when the model's own field happened
-//      to look right).
-// A row that matches neither check is dropped, never shown as live.
+// Honesty guarantee (mirrors the Gemini-grounded provider's guarantee it
+// replaces): a batch of rows is only ever reported "live" when the
+// response actually contains a web_search tool-call item AND at least one
+// row survives schema/URL validation below. A response with no
+// web_search_call item - the model answering from its own memory instead
+// of actually searching - is never treated as live, however plausible its
+// JSON looks (product-spec section 4: never claim "found this job online"
+// without real web-search evidence).
 //
-// This has NOT been exercised against a live, billed API key (no network
-// access in the build/verification sandbox). The redirect-URL matching
-// path in particular is written defensively (see resolveRedirectUrl below)
-// but its real-world behavior against actual grounding chunk shapes is
-// unverified until tested against a real key — see the Local Live Test
-// Checklist this hardening pass ships with.
-exports.discoverOpportunitiesGrounded = async (query = {}) => {
-  const {
-    role = "",
-    location = "",
-    remote_preference = "any",
-    skills = [],
-    experience = "",
-  } = query;
-
-  const notLive = { rows: [], isLive: false, note: "", grounding: null };
-
-  if (!process.env.GEMINI_API_KEY) {
-    return { ...notLive, note: "GEMINI_API_KEY is not configured — grounded discovery skipped." };
-  }
-  if (process.env.ENABLE_AI_JOB_DISCOVERY === "false") {
-    return { ...notLive, note: "AI job discovery is disabled by configuration (ENABLE_AI_JOB_DISCOVERY=false)." };
-  }
-
-  const intent = [
-    role ? `Target role: ${role}` : "",
-    location ? `Location: ${location}` : "",
-    remote_preference && remote_preference !== "any" ? `Work mode: ${remote_preference}` : "",
-    experience ? `Experience level: ${experience}` : "",
-    skills.length ? `Relevant skills: ${skills.join(", ")}` : "",
-  ]
-    .filter(Boolean)
-    .join("\n");
-
-  const prompt = `
-    Use Google Search to find CURRENT, real, publicly listed job openings matching this job seeker's intent.
-
-    ${intent || "General open roles across common industries."}
-
-    Rules:
-    - Only include openings you actually found through search just now. Never invent a listing, company, or URL.
-    - If you cannot find real listings matching this intent, return an empty JSON array — do not substitute unrelated or made-up roles to fill space.
-    - Prefer legitimate job-search platforms, public job indexes, and company career pages.
-    - Link directly to the specific job listing you found, not a generic careers/jobs landing page, unless that landing page IS the actual search result.
-    - Skip anything that search results indicate is closed, expired, or filled.
-    - Skip old cached or archived pages — prefer results that look current.
-    - Do not list the same job twice, even if it appeared in more than one search result.
-    - Skip results that don't genuinely match the requested role/location/work-mode intent.
-    - For each listing, include the exact source URL from the search result you found it at.
-    - Only fill "posted_at" if the search result clearly states a posting date. If you are not confident of the exact date, leave it null — never guess or estimate a date.
-    - Do not fabricate any field (salary, employment type, requirements, etc.) that the search result didn't actually show — leave it null or an empty array instead.
-    - Return at most 8 listings.
-
-    Respond with ONLY a JSON array, no markdown fences, no commentary, in this exact shape:
-    [
-      {
-        "role": "",
-        "company": "",
-        "location": "",
-        "employment_type": "",
-        "remote": false,
-        "description": "",
-        "requirements": [],
-        "source_platform": "",
-        "source_url": "",
-        "posted_at": null,
-        "salary_range": null
-      }
-    ]
-  `;
-
-  try {
-    await waitIfNeeded();
-
-    const model = genAI.getGenerativeModel({
-      model: "gemini-3.8-live",
-      tools: [{ googleSearch: {} }],
-    });
-
-    const result = await model.generateContent({
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-      // No responseMimeType here on purpose — see comment above.
-      generationConfig: { temperature: 0.2 },
-    });
-
-    const response = await result.response;
-    const candidate = response.candidates?.[0];
-    const groundingChunks = candidate?.groundingMetadata?.groundingChunks || [];
-
-    if (!groundingChunks.length) {
-      return {
-        ...notLive,
-        note:
-          "Gemini returned no search-grounding metadata for this query, so no listings are shown as live. " +
-          "This can mean the configured model/SDK/API key does not have Search grounding enabled, or the " +
-          "request simply didn't need a search. Falling back to development samples.",
-      };
-    }
-
-    let text = (response.text() || "")
-      .replace(/```json/gi, "")
-      .replace(/```/g, "")
-      .trim();
-    const parsed = safeParse(text);
-
-    if (!Array.isArray(parsed) || !parsed.length) {
-      return {
-        ...notLive,
-        note: "Grounded search ran but returned no parseable job listings for this query.",
-      };
-    }
-
-    const { rows, matchedCount } = matchRowsToGrounding(parsed, groundingChunks);
-
-    if (!rows.length) {
-      return {
-        ...notLive,
-        note:
-          "Grounded search ran, but the listings Gemini described couldn't be matched back to an actual " +
-          "search result (by URL or by the search result's own title), so none are shown as verified live " +
-          "opportunities.",
-      };
-    }
-
-    return {
-      rows,
-      isLive: true,
-      note: `Grounded search matched ${matchedCount} listing(s) to real search results.`,
-      grounding: {
-        queries: candidate?.groundingMetadata?.webSearchQueries || [],
-        chunk_count: groundingChunks.length,
-        sources: groundingChunks.map((c) => c.web?.uri).filter(Boolean),
-      },
-    };
-  } catch (err) {
-    console.error("discoverOpportunitiesGrounded error:", err.message);
-    if (err.message?.includes("429")) {
-      await new Promise((r) => setTimeout(r, 65000));
-      return exports.discoverOpportunitiesGrounded(query);
-    }
-    return {
-      ...notLive,
-      note: `Live grounded discovery is unavailable right now (${(err.message || "unknown error").slice(0, 160)}). Falling back to development samples.`,
-    };
-  }
-};
-
-// ── Grounding evidence matching ─────────────────────────────────────────
-// Kept separate from the main function so the matching logic (the part
-// most likely to need real-world tuning once tested against a live,
-// billed API key — see file header) is easy to find and adjust in
-// isolation without touching the request/prompt logic around it.
-
+// Also mirrors the same API constraint noted on the old Gemini-grounded
+// path: providers generally don't support forcing strict JSON output at
+// the same time as a hosted tool, so this asks for pure JSON as plain
+// text in the prompt and parses it leniently with safeParse(), same as
+// every other function in this file already does for non-strict output.
+//
+// This has NOT been exercised against a live, billed OpenAI API key - the
+// sandbox this was built in has no network route to api.openai.com (see
+// the final delivery report). The request/response shape follows OpenAI's
+// documented Responses API web-search tool contract as of this writing;
+// OPENAI_WEB_SEARCH_TOOL_TYPE is kept configurable (config/openai.js) so
+// an operator can correct the tool name in one place if OpenAI versions it
+// differently by the time this runs against a real key.
 function hostOf(url) {
   try {
     return new URL(url).hostname.replace(/^www\./, "").toLowerCase();
@@ -450,85 +331,230 @@ function hostOf(url) {
   }
 }
 
-// Extension point: Google Search grounding chunks sometimes return a
-// Google-hosted redirect/proxy URI (e.g. a vertexaisearch.cloud.google.com
-// or generativelanguage redirect link) rather than the publisher's direct
-// URL. That redirect still functionally takes the user to the right place
-// (it's not broken), but it means host-based matching against the model's
-// own copied URL can legitimately fail even for a genuine result — hence
-// the title-based fallback in matchRowsToGrounding() below.
-//
-// This sandbox has no network access, so actually following the redirect
-// to confirm/replace it with the final destination URL cannot be done or
-// tested here. This function is the seam for that later: swap the no-op
-// below for a real HTTP HEAD/GET-with-redirect-follow (with a short
-// timeout and a strict allowlist of Google redirect hosts to avoid
-// following arbitrary links), and nothing else in this file needs to
-// change — callers already treat this as the source of truth for a
-// chunk's URL.
-async function resolveRedirectUrl(url) {
-  return url; // TODO: implement real redirect resolution once network access + a live key are available to test against.
+// A URL is "specific enough" to be a real job listing (product-spec
+// section 10) when it has a real path beyond the bare domain root - e.g.
+// reject "https://linkedin.com" or "https://indeed.com/" but accept
+// "https://company.com/careers/backend-engineer-42".
+function isSpecificJobUrl(url) {
+  try {
+    const u = new URL(url);
+    const path = u.pathname.replace(/\/+$/, "");
+    return path.length > 1;
+  } catch {
+    return false;
+  }
 }
-exports.resolveRedirectUrl = resolveRedirectUrl; // exported so it can be swapped/tested independently later
 
-// Matches parsed JSON rows against real grounding chunks. Returns only
-// rows with real evidence; for title-matched rows, source_url is replaced
-// with the grounding chunk's own (verified) URI rather than trusting
-// whatever URL string the model put in its JSON.
-function matchRowsToGrounding(parsedRows, groundingChunks) {
-  const chunks = groundingChunks
-    .map((c) => ({ uri: c.web?.uri || "", title: c.web?.title || "" }))
-    .filter((c) => c.uri);
+// Extracts { usedWebSearch, citations, hosts, text } from a Responses API
+// output array's message content annotations (url_citation entries) -
+// this is the REAL evidence a web search happened and what it actually
+// retrieved, independent of whatever the model's own JSON narrates.
+function extractWebEvidence(output) {
+  const citations = [];
+  let usedWebSearch = false;
+  let text = "";
 
-  const hostsToChunks = new Map();
-  for (const c of chunks) {
-    const h = hostOf(c.uri);
-    if (h) {
-      if (!hostsToChunks.has(h)) hostsToChunks.set(h, []);
-      hostsToChunks.get(h).push(c);
+  for (const item of Array.isArray(output) ? output : []) {
+    if (item?.type === "web_search_call") {
+      usedWebSearch = true;
+    }
+    if (item?.type === "message" && Array.isArray(item.content)) {
+      for (const part of item.content) {
+        if (typeof part?.text === "string") text += part.text;
+        for (const ann of part?.annotations || []) {
+          if (ann?.type === "url_citation" && ann.url) {
+            citations.push({ url: ann.url, title: ann.title || null });
+          }
+        }
+      }
     }
   }
 
-  const rows = [];
-  let matchedCount = 0;
+  const hosts = new Set(citations.map((c) => hostOf(c.url)).filter(Boolean));
+  return { usedWebSearch, citations, hosts, text };
+}
 
-  for (const r of parsedRows) {
-    if (!r || !r.role || !r.source_url) continue;
+// Normalizes one AI-extracted row into the canonical opportunity fields
+// this function returns to its caller (discoveryProviders/openaiWebSearchProvider.js
+// maps these into the full internal opportunityShape). Deliberately narrow:
+// this only trims/coerces types - it NEVER fabricates a value that wasn't
+// present in the model's own output (product-spec section 6: "If
+// information is unavailable, value = null... never guess").
+function normalizeWebRow(raw) {
+  const str = (v) => (typeof v === "string" && v.trim() ? v.trim() : null);
+  const arr = (v) => (Array.isArray(v) ? v.map((s) => String(s).trim()).filter(Boolean) : []);
+  return {
+    role: str(raw.role) || "",
+    company: str(raw.company) || "",
+    location: str(raw.location),
+    country: str(raw.country),
+    city: str(raw.city),
+    remote_type: ["remote", "hybrid", "onsite"].includes(String(raw.remote_type || "").toLowerCase())
+      ? String(raw.remote_type).toLowerCase()
+      : "unknown",
+    remote_eligibility: raw.remote_eligibility ?? null, // e.g. ["US"], "worldwide", or null - never invented if absent
+    experience_level: str(raw.experience_level),
+    employment_type: str(raw.employment_type) || "",
+    description: str(raw.description) || "",
+    skills: arr(raw.skills || raw.requirements),
+    source_platform: str(raw.source_platform),
+    source_url: str(raw.source_url) || "",
+    posted_at: str(raw.posted_at), // left as the source's own text/date; caller/freshness filter parses it
+    salary_range: str(raw.salary_range),
+  };
+}
 
-    const rowHost = hostOf(r.source_url);
+exports.discoverOpportunitiesWebSearch = async (query = {}) => {
+  const notLive = { rows: [], isLive: false, note: null, citations: [] };
 
-    // 1. Direct/host match — the model's own URL is on the same host as a
-    //    grounded result. Trust the model's URL as-is (it's the specific
-    //    page, the chunk may only carry the domain-level result).
-    if (rowHost && hostsToChunks.has(rowHost)) {
-      rows.push(r);
-      matchedCount++;
-      continue;
-    }
-
-    // 2. Title match — the model's URL didn't match any grounded host
-    //    (commonly because Google wrapped the real result in a redirect
-    //    URI). Look for a grounding chunk whose title plausibly describes
-    //    this same listing (company and/or role text both appear, case-
-    //    insensitively). If found, trust the CHUNK's own URI instead of
-    //    the model's — verified data over narrated data.
-    const needle = [r.company, r.role].filter(Boolean).map((s) => String(s).toLowerCase());
-    const titleMatch = needle.length
-      ? chunks.find((c) => {
-          const title = c.title.toLowerCase();
-          return needle.every((n) => n && title.includes(n));
-        })
-      : null;
-
-    if (titleMatch) {
-      rows.push({ ...r, source_url: titleMatch.uri, source_url_via: "grounding_title_match" });
-      matchedCount++;
-    }
-    // else: no real evidence for this row — dropped, never shown as live.
+  if (!isWebSearchEnabled()) {
+    return {
+      ...notLive,
+      note: !isConfigured()
+        ? "OPENAI_API_KEY is not configured - web-search discovery skipped."
+        : "OpenAI web-search discovery is disabled (OPENAI_WEB_SEARCH_ENABLED=false).",
+    };
   }
 
-  return { rows, matchedCount };
-}
+  const {
+    role = "",
+    location = "",
+    skills = [],
+    remote_preference = "any",
+    experience = "",
+    employment_type = "",
+    freshness = "any",
+  } = query;
+
+  const prompt = `
+    You are JobGuard's Opportunity research assistant. Use web search to find
+    REAL, CURRENTLY OPEN job listings that genuinely match the candidate's
+    request below. Do not use your own unstated knowledge instead of
+    searching - every listing you return must come from a page you actually
+    retrieved via web search this call.
+
+    Candidate request:
+    - Target role: ${role || "Not specified"}
+    - Required skills: ${skills.length ? skills.join(", ") : "Not specified"}
+    - Preferred location: ${location || "Not specified (worldwide)"}
+    - Work mode: ${remote_preference}
+    - Experience level: ${experience || "Not specified"}
+    - Employment type: ${employment_type || "Not specified"}
+    - Freshness: ${freshness}
+
+    CRITICAL RULES:
+    - Never invent a company, role, location, salary, posting date, or URL.
+      If a field is not clearly present on the source page, use null (or ""
+      for text fields, [] for list fields) - do not guess or estimate.
+    - source_url must be the specific job/listing page you found, not a
+      generic homepage, generic careers landing page, or generic search
+      results page, whenever a specific page is available.
+    - remote_type must reflect what the source actually states, not an
+      assumption based on the site the listing appears on.
+    - remote_eligibility should only be set when the source explicitly
+      states geographic eligibility (e.g. "US only", "worldwide"); leave it
+      null otherwise. Never assume "remote" means worldwide-eligible.
+    - Return between 0 and 12 listings - quality and accuracy over count.
+
+    Return ONLY a valid JSON array, no markdown, no extra text, in this
+    exact shape (use null/""/[] for anything not found on the source page):
+    [
+      {
+        "role": "",
+        "company": "",
+        "location": "",
+        "country": null,
+        "city": null,
+        "remote_type": "remote | hybrid | onsite | unknown",
+        "remote_eligibility": null,
+        "experience_level": null,
+        "employment_type": "",
+        "description": "",
+        "skills": [],
+        "source_platform": "",
+        "source_url": "",
+        "posted_at": null,
+        "salary_range": null
+      }
+    ]
+  `;
+
+  async function callWebSearch() {
+    const res = await axios.post(
+      `${OPENAI_BASE_URL}/responses`,
+      {
+        model: OPENAI_WEB_SEARCH_MODEL,
+        input: prompt,
+        tools: [{ type: OPENAI_WEB_SEARCH_TOOL_TYPE }],
+        tool_choice: "auto",
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        timeout: OPENAI_WEB_SEARCH_TIMEOUT_MS,
+      }
+    );
+    return res.data;
+  }
+
+  try {
+    const data = await callWebSearch();
+    const { usedWebSearch, citations, hosts, text } = extractWebEvidence(data?.output);
+
+    if (!usedWebSearch) {
+      return {
+        ...notLive,
+        note: "OpenAI did not perform a web search for this query - no live results returned (never substituting unsearched output).",
+      };
+    }
+
+    const cleaned = String(text || "")
+      .replace(/```json/gi, "")
+      .replace(/```/g, "")
+      .trim();
+    const parsed = safeParse(cleaned);
+
+    if (!Array.isArray(parsed)) {
+      return {
+        ...notLive,
+        isLive: false,
+        note: "OpenAI web search ran, but returned no parseable structured results.",
+        citations,
+      };
+    }
+
+    const rows = parsed
+      .map(normalizeWebRow)
+      .filter((r) => r.role && r.company && r.source_url)
+      // URL must be syntactically valid and point at a specific page, not
+      // a generic homepage (product-spec section 10).
+      .filter((r) => isSpecificJobUrl(r.source_url))
+      // Defense-in-depth evidence check (product-spec section 9): when the
+      // API actually returned citation hosts, require the row's own
+      // source_url host to be among them - never just take the model's
+      // narrated URL on faith. If no citation hosts came back at all (some
+      // API responses omit annotations), fall back to URL-validity only
+      // rather than discarding every row outright.
+      .filter((r) => (hosts.size === 0 ? true : hosts.has(hostOf(r.source_url))));
+
+    return {
+      rows,
+      isLive: rows.length > 0,
+      note: rows.length
+        ? null
+        : "OpenAI web search ran, but no candidate listing had a verifiable, specific source URL.",
+      citations,
+    };
+  } catch (err) {
+    console.error("discoverOpportunitiesWebSearch error:", err.message);
+    return {
+      ...notLive,
+      note: `OpenAI web-search discovery failed (${err.response?.status || err.code || "error"}). Please try again shortly.`,
+    };
+  }
+};
 
 // =====================================================
 // OPPORTUNITY RELEVANCE — explanation only, never scoring
@@ -541,10 +567,10 @@ function matchRowsToGrounding(parsedRows, groundingChunks) {
 // grounded strictly in the fields it's given. It never re-scores, never
 // invents a skill/fact that wasn't already in matched_skills/missing_skills,
 // and never runs if there's nothing to explain. Uses the same plain
-// (non-grounded, JSON-mode) callGemini() as every other analysis function
+// (non-grounded, JSON-mode) callOpenAI() as every other analysis function
 // in this file — no Search grounding, no special billing requirement.
 exports.explainOpportunityRelevance = async (query, candidates = []) => {
-  if (!candidates.length || !process.env.GEMINI_API_KEY) return {};
+  if (!candidates.length || !isConfigured()) return {};
 
   const items = candidates.slice(0, 8).map((c) => ({
     id: c.id,
@@ -583,7 +609,7 @@ exports.explainOpportunityRelevance = async (query, candidates = []) => {
 
   try {
     await waitIfNeeded();
-    const text = await callGemini(prompt);
+    const text = await callOpenAI(prompt);
     const parsed = safeParse(text);
     const list = Array.isArray(parsed?.explanations) ? parsed.explanations : [];
     const byId = {};
@@ -635,13 +661,13 @@ exports.extractJobInfo = async (content) => {
 
   try {
     await waitIfNeeded();
-    let text = await callGemini(prompt);
+    let text = await callOpenAI(prompt);
     let parsed = safeParse(text);
 
     if (!parsed) {
       await new Promise((r) => setTimeout(r, 1500));
       await waitIfNeeded();
-      text = await callGemini(prompt);
+      text = await callOpenAI(prompt);
       parsed = safeParse(text);
       if (!parsed) return empty();
     }
@@ -739,13 +765,13 @@ exports.analyzeResume = async (resumeText, contextInfo = {}) => {
 
   try {
     await waitIfNeeded();
-    let text = await callGemini(prompt);
+    let text = await callOpenAI(prompt);
     let parsed = safeParse(text);
 
     if (!parsed) {
       await new Promise((r) => setTimeout(r, 2000));
       await waitIfNeeded();
-      text = await callGemini(prompt);
+      text = await callOpenAI(prompt);
       parsed = safeParse(text);
     }
 
@@ -826,13 +852,13 @@ exports.generateOptimizedResume = async (resumeText, contextInfo = {}, reviewSum
 
   try {
     await waitIfNeeded();
-    let text = await callGemini(prompt);
+    let text = await callOpenAI(prompt);
     let parsed = safeParse(text);
 
     if (!parsed) {
       await new Promise((r) => setTimeout(r, 2000));
       await waitIfNeeded();
-      text = await callGemini(prompt);
+      text = await callOpenAI(prompt);
       parsed = safeParse(text);
     }
 
@@ -874,12 +900,12 @@ exports.generateResumeContent = async (profileData, role) => {
 
   try {
     await waitIfNeeded();
-    let text = await callGemini(prompt);
+    let text = await callOpenAI(prompt);
     let parsed = safeParse(text);
     if (!parsed) {
       await new Promise((r) => setTimeout(r, 2000));
       await waitIfNeeded();
-      text = await callGemini(prompt);
+      text = await callOpenAI(prompt);
       parsed = safeParse(text);
     }
     return parsed || { isFallback: true, summary: "", experience_bullets: {}, project_bullets: {}, skills_suggestions: [] };
@@ -1014,12 +1040,12 @@ ${JSON.stringify(
 
   try {
     await waitIfNeeded();
-    let text = await callGemini(prompt);
+    let text = await callOpenAI(prompt);
     let parsed = safeParse(text);
     if (!parsed) {
       await new Promise((r) => setTimeout(r, 2000));
       await waitIfNeeded();
-      text = await callGemini(prompt);
+      text = await callOpenAI(prompt);
       parsed = safeParse(text);
     }
 
@@ -1140,12 +1166,12 @@ ${String(opportunitySummary).slice(0, 1000)}`
 
   try {
     await waitIfNeeded();
-    let text = await callGemini(prompt);
+    let text = await callOpenAI(prompt);
     let parsed = safeParse(text);
     if (!parsed) {
       await new Promise((r) => setTimeout(r, 2000));
       await waitIfNeeded();
-      text = await callGemini(prompt);
+      text = await callOpenAI(prompt);
       parsed = safeParse(text);
     }
     if (!Array.isArray(parsed)) return [];
@@ -1257,12 +1283,12 @@ exports.generateInterviewReport = async (role, questions, meta = {}) => {
 
   try {
     await waitIfNeeded();
-    let text = await callGemini(prompt);
+    let text = await callOpenAI(prompt);
     let parsed = safeParse(text);
     if (!parsed) {
       await new Promise((r) => setTimeout(r, 2000));
       await waitIfNeeded();
-      text = await callGemini(prompt);
+      text = await callOpenAI(prompt);
       parsed = safeParse(text);
     }
     if (!parsed) {

@@ -5,10 +5,11 @@ const {
   generateInterviewQuestions,
   generateAdaptiveInterviewStep,
   generateInterviewReport,
-} = require("../services/geminiService");
+} = require("../services/aiService");
 const { consumeCareerSession } = require("../middleware/careerSession");
 const { getStatus } = require("../services/careerSessionService");
 const { normalizeInterviewReport } = require("../utils/interviewReportNormalize");
+const careerFocusService = require("../services/careerFocusService");
 
 const ALLOWED_DIFFICULTY = new Set(["Beginner", "Intermediate", "Advanced"]);
 const ALLOWED_TYPE = new Set(["HR Interview", "Technical Interview", "Mixed Interview"]);
@@ -138,6 +139,20 @@ function parseStartInput(body) {
 // POST /api/interview/start
 exports.start = async (req, res) => {
   try {
+    // Career Focus context (product-spec sections 26-30, 37) — fills in
+    // role/experience only when the request itself left them blank.
+    let focus = null;
+    if (req.user?.id) {
+      focus = await careerFocusService.resolveFocusForRequest(req.user.id, req.body.career_focus_id);
+      const focusContext = careerFocusService.toPromptContext(focus);
+      if (focusContext) {
+        if (!req.body.role && focusContext.target_role) req.body.role = focusContext.target_role;
+        if (!req.body.experience && focusContext.experience_level) {
+          req.body.experience = focusContext.experience_level;
+        }
+      }
+    }
+
     const parsed = parseStartInput(req.body || {});
     if (parsed.error) return safeError(res, 400, parsed.error);
 
@@ -192,6 +207,7 @@ exports.start = async (req, res) => {
 
       const session = await InterviewSession.create({
         user_id: req.user.id,
+        career_focus_id: focus?.id || null,
         role: parsed.role,
         company: parsed.company,
         experience: parsed.experience,
@@ -208,6 +224,7 @@ exports.start = async (req, res) => {
       });
 
       await consumeCareerSession(req);
+      if (focus) await careerFocusService.touchLastUsed(focus);
 
       return res.status(201).json({
         success: true,
@@ -241,6 +258,7 @@ exports.start = async (req, res) => {
     if (req.user?.id) {
       const session = await InterviewSession.create({
         user_id: req.user.id,
+        career_focus_id: focus?.id || null,
         role: parsed.role,
         company: parsed.company,
         experience: parsed.experience,
@@ -258,6 +276,7 @@ exports.start = async (req, res) => {
     }
 
     await consumeCareerSession(req);
+    if (focus) await careerFocusService.touchLastUsed(focus);
 
     return res.status(201).json({
       success: true,

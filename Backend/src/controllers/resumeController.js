@@ -6,9 +6,10 @@ const {
   analyzeResume,
   generateResumeContent,
   generateOptimizedResume,
-} = require("../services/geminiService");
+} = require("../services/aiService");
 const { consumeCareerSession } = require("../middleware/careerSession");
 const { getStatus } = require("../services/careerSessionService");
+const careerFocusService = require("../services/careerFocusService");
 
 // ── RESUME REVIEW ────────────────────────────────────────────
 // POST /api/resume/analyze  (multipart: resume file, + role, experience, description)
@@ -21,7 +22,13 @@ exports.analyze = async (req, res) => {
     }
     filePath = req.file.path;
 
-    const { role, experience, description } = req.body;
+    const { role: bodyRole, experience: bodyExperience, description } = req.body;
+    const focus = req.user?.id
+      ? await careerFocusService.resolveFocusForRequest(req.user.id, req.body.career_focus_id)
+      : null;
+    const focusContext = careerFocusService.toPromptContext(focus);
+    const role = bodyRole || focusContext?.target_role;
+    const experience = bodyExperience || focusContext?.experience_level;
     if (!role) {
       return res.status(400).json({ success: false, message: "Role required" });
     }
@@ -49,6 +56,7 @@ exports.analyze = async (req, res) => {
     }
 
     await consumeCareerSession(req);
+    if (focus) await careerFocusService.touchLastUsed(focus);
 
     return res.json({
       success: true,

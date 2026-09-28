@@ -16,8 +16,12 @@ function emptyOpportunity(overrides = {}) {
               // verification/recommendation/frontend, all already built on this name
     company: "",
     location: "",
+    country: null, // structured, when a provider/AI-search result actually states it
+    city: null,
     employment_type: "",
     remote: false,
+    remote_type: "unknown", // "remote" | "hybrid" | "onsite" | "unknown" — never guessed from remote alone
+    remote_eligibility: null, // e.g. ["US"], "worldwide" — only ever set when the source explicitly states it
     seniority: null, // source-reported level only — never inferred/guessed
     description: "",
     requirements: [], // aka "skills" in the product-spec shape — same field
@@ -36,6 +40,9 @@ function emptyOpportunity(overrides = {}) {
     // Honest provenance flags — UI must surface these
     is_live: false,
     is_development_sample: false,
+    is_ai_discovered: false, // true only for AI-web-search-sourced rows (openaiWebSearchProvider)
+    discovery_method: null, // e.g. "openai_web_search", "jobicy", "himalayas", "remotive"
+    evidence: [], // [{ type, source_url, retrieved_at }] — backend-stamped, never trusted from AI narration alone
     ...overrides,
   };
 }

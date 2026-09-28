@@ -1,5 +1,5 @@
 const Context = require("../models/Context");
-const { extractJobInfo } = require("../services/geminiService");
+const { extractJobInfo } = require("../services/aiService");
 const { extractWebsiteText } = require("../services/scraperService");
 const { extractTextFromImage } = require("../services/ocrService");
 const fs = require("fs");

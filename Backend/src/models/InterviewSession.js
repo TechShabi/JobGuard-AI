@@ -13,6 +13,11 @@ const InterviewSession = sequelize.define(
       type: DataTypes.INTEGER,
       allowNull: false,
     },
+    // Nullable — which Career Focus this interview session belongs to.
+    career_focus_id: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+    },
     role: {
       type: DataTypes.STRING,
       allowNull: false,

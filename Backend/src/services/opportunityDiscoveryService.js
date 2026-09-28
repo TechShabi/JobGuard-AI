@@ -15,8 +15,9 @@
  *      static capability flag.
  *
  * discovery_status (meta-level, single unambiguous field):
- *   "live_provider" — confirmed-live rows from a real free/public provider
- *                      this call (Jobicy / Himalayas / Remotive)
+ *   "live_provider" — confirmed-live rows from a real provider this call
+ *                      (primarily OpenAI web-search discovery; Jobicy /
+ *                      Himalayas / Remotive only when explicitly enabled)
  *   "sample"        — no live rows; development samples shown instead
  *                      (non-production only — see devSampleAllowed() below)
  *   "unavailable"   — no live rows, and samples are not being shown either
@@ -25,13 +26,27 @@
  *   "error"         — a live-capable provider itself threw/failed and no
  *                      live rows or samples are being shown
  *
- * MVP discovery uses only free, public, no-key job APIs — Jobicy,
- * Himalayas, Remotive (see discoveryProviders/*Provider.js) — specifically
- * NOT Gemini Google Search grounding, which requires a billed/paid Gemini
- * tier this MVP does not depend on. geminiGroundedProvider.js still exists
- * and is still wired into this file's require list so it can be re-enabled
- * later with a one-line change (ENABLE_GEMINI_GROUNDED_DISCOVERY=true) —
- * see below — but it is NOT registered in PROVIDERS by default.
+ * FINAL PRODUCT ARCHITECTURE (see openaiWebSearchProvider.js): the primary
+ * discovery mechanism is OpenAI web search — worldwide, not tied to any
+ * one region's job-API dataset. It is registered by default whenever
+ * OPENAI_API_KEY is configured (see config/openai.js#isWebSearchEnabled).
+ *
+ * The regional free/public job APIs (Jobicy, Himalayas, Remotive) that
+ * were the MVP's original discovery mechanism are RETAINED but are no
+ * longer the default runtime path — the product now needs worldwide
+ * discovery rather than a handful of provider-specific geographic
+ * datasets. They stay fully implemented and are one env var away from
+ * being additive discovery sources again: set
+ * ENABLE_JOB_API_PROVIDERS=true to register them alongside OpenAI web
+ * search (never as a replacement for it). This keeps the architecture
+ * provider-agnostic for a future paid search provider or direct job-board
+ * integration, per product spec, without requiring a redesign.
+ *
+ * Gemini Google Search grounding (geminiGroundedProvider.js) remains what
+ * it always was here: fully implemented, NOT registered by default, and
+ * one env var (ENABLE_GEMINI_GROUNDED_DISCOVERY=true) away from being
+ * re-enabled if a billed Gemini tier with Search grounding is ever wanted
+ * again. It is never the production discovery path.
  *
  * Production honesty rule (mirrors the existing payment-provider pattern in
  * services/paymentProviders/index.js — same isProduction()/*Allowed() shape,
@@ -49,6 +64,12 @@
  */
 
 const { emptyOpportunity, stableId } = require("./discoveryProviders/opportunityShape");
+// PRIMARY discovery mechanism — worldwide OpenAI web search. See file
+// header and openaiWebSearchProvider.js's own header for the honesty
+// guarantees (only reported live when real web-search evidence exists).
+const OpenAiWebSearchProvider = require("./discoveryProviders/openaiWebSearchProvider");
+// Regional free/public job-API adapters — retained, additive-only, opt-in
+// (ENABLE_JOB_API_PROVIDERS=true). See file header.
 const JobicyProvider = require("./discoveryProviders/jobicyProvider");
 const HimalayasProvider = require("./discoveryProviders/himalayasProvider");
 const RemotiveProvider = require("./discoveryProviders/remotiveProvider");
@@ -57,6 +78,7 @@ const RemotiveProvider = require("./discoveryProviders/remotiveProvider");
 // once a billed Gemini tier with Search grounding is actually available.
 const GeminiGroundedProvider = require("./discoveryProviders/geminiGroundedProvider");
 const { isProduction } = require("../config/productionGuard");
+const { isWebSearchEnabled } = require("../config/openai");
 
 // function devSampleAllowed() {
 //   if (!isProduction()) return true;
@@ -179,16 +201,19 @@ const { isProduction } = require("../config/productionGuard");
 //   return d.toISOString();
 // }
 
-// Free/public, zero-cost providers are tried first (isLive:true — they
-// attempt live discovery whenever called). GeminiGroundedProvider is
-// opt-in only (see file header) — never registered unless explicitly
-// enabled, so MVP discovery never depends on paid Search grounding.
-// DevelopmentSampleProvider is the guaranteed fallback (when
-// devSampleAllowed() permits it — see file header).
+// OpenAI web search is the PRIMARY provider — registered whenever an
+// OpenAI API key is configured (config/openai.js#isWebSearchEnabled).
+// Regional job-API providers are additive-only opt-ins
+// (ENABLE_JOB_API_PROVIDERS=true) — never required for MVP discovery.
+// GeminiGroundedProvider is opt-in only (see file header) — never
+// registered unless explicitly enabled. DevelopmentSampleProvider is the
+// guaranteed fallback (when devSampleAllowed() permits it — see file
+// header).
 const PROVIDERS = [
-  JobicyProvider,
-  HimalayasProvider,
-  RemotiveProvider,
+  ...(isWebSearchEnabled() ? [OpenAiWebSearchProvider] : []),
+  ...(process.env.ENABLE_JOB_API_PROVIDERS === "true"
+    ? [JobicyProvider, HimalayasProvider, RemotiveProvider]
+    : []),
   ...(process.env.ENABLE_GEMINI_GROUNDED_DISCOVERY === "true" ? [GeminiGroundedProvider] : []),
 ];
 

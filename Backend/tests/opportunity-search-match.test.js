@@ -197,5 +197,135 @@ test("Scenario E: Backend + Python + Remote — a Node.js-only job (no Python ev
   assert.strictEqual(r.rejection_code, "SKILL_MISMATCH");
 });
 
+console.log("\nExperience filtering");
+test("Senior search rejects a clearly Internship-level listing", () => {
+  const r = matchesSearchCriteria(opp({ role: "Backend Developer", seniority: "Internship" }), {
+    role: "Backend Developer",
+    experience: "Senior",
+  });
+  assert.strictEqual(r.pass, false);
+  assert.strictEqual(r.rejection_code, "EXPERIENCE_MISMATCH");
+});
+test("Senior search matches a Senior-level listing", () => {
+  const r = matchesSearchCriteria(opp({ role: "Backend Developer", seniority: "Senior Backend Engineer" }), {
+    role: "Backend Developer",
+    experience: "Senior",
+  });
+  assert.strictEqual(r.pass, true);
+});
+test("Unknown (missing) experience on the listing is NOT treated as a mismatch", () => {
+  const r = matchesSearchCriteria(opp({ role: "Backend Developer", seniority: null }), {
+    role: "Backend Developer",
+    experience: "Mid-level",
+  });
+  assert.strictEqual(r.pass, true, "omission is not evidence of disqualification");
+});
+
+console.log("\nEmployment type filtering");
+test("Full-time search rejects a listing explicitly marked Contract", () => {
+  const r = matchesSearchCriteria(opp({ role: "Backend Developer", employment_type: "Contract" }), {
+    role: "Backend Developer",
+    employment_type: "Full-time",
+  });
+  assert.strictEqual(r.pass, false);
+  assert.strictEqual(r.rejection_code, "EMPLOYMENT_TYPE_MISMATCH");
+});
+test("Full-time search matches a Full-time listing", () => {
+  const r = matchesSearchCriteria(opp({ role: "Backend Developer", employment_type: "Full Time" }), {
+    role: "Backend Developer",
+    employment_type: "Full-time",
+  });
+  assert.strictEqual(r.pass, true);
+});
+test("Unknown (missing) employment type on the listing is NOT treated as a mismatch", () => {
+  const r = matchesSearchCriteria(opp({ role: "Backend Developer", employment_type: "" }), {
+    role: "Backend Developer",
+    employment_type: "Full-time",
+  });
+  assert.strictEqual(r.pass, true);
+});
+
+console.log("\nFreshness filtering");
+function daysAgoIso(n) {
+  const d = new Date();
+  d.setDate(d.getDate() - n);
+  return d.toISOString();
+}
+test("Last 24 hours: a listing posted 5 days ago is rejected", () => {
+  const r = matchesSearchCriteria(opp({ role: "Backend Developer", posted_at: daysAgoIso(5) }), {
+    role: "Backend Developer",
+    freshness: "24h",
+  });
+  assert.strictEqual(r.pass, false);
+  assert.strictEqual(r.rejection_code, "FRESHNESS_MISMATCH");
+});
+test("Last 7 days: a listing posted 2 days ago passes", () => {
+  const r = matchesSearchCriteria(opp({ role: "Backend Developer", posted_at: daysAgoIso(2) }), {
+    role: "Backend Developer",
+    freshness: "7d",
+  });
+  assert.strictEqual(r.pass, true);
+});
+test("Strict freshness search rejects a listing with NO posted_at (unknown is not a confirmed match)", () => {
+  const r = matchesSearchCriteria(opp({ role: "Backend Developer", posted_at: null }), {
+    role: "Backend Developer",
+    freshness: "3d",
+  });
+  assert.strictEqual(r.pass, false);
+  assert.strictEqual(r.rejection_code, "FRESHNESS_UNKNOWN");
+});
+test("No freshness constraint ('any') never rejects on posting date", () => {
+  const r = matchesSearchCriteria(opp({ role: "Backend Developer", posted_at: null }), {
+    role: "Backend Developer",
+    freshness: "any",
+  });
+  assert.strictEqual(r.pass, true);
+});
+
+console.log("\nCombined AND semantics with the new filters");
+test("Role + skills + remote + experience + employment_type + freshness must ALL pass", () => {
+  const r = matchesSearchCriteria(
+    opp({
+      role: "Backend Developer",
+      requirements: ["Node.js"],
+      remote: true,
+      seniority: "Mid-level",
+      employment_type: "Full-time",
+      posted_at: daysAgoIso(1),
+    }),
+    {
+      role: "Backend Developer",
+      skills: ["Node.js"],
+      remote_preference: "remote",
+      experience: "Mid-level",
+      employment_type: "Full-time",
+      freshness: "3d",
+    }
+  );
+  assert.strictEqual(r.pass, true);
+});
+test("Same candidate but wrong employment_type fails the whole gate (AND, not OR)", () => {
+  const r = matchesSearchCriteria(
+    opp({
+      role: "Backend Developer",
+      requirements: ["Node.js"],
+      remote: true,
+      seniority: "Mid-level",
+      employment_type: "Contract",
+      posted_at: daysAgoIso(1),
+    }),
+    {
+      role: "Backend Developer",
+      skills: ["Node.js"],
+      remote_preference: "remote",
+      experience: "Mid-level",
+      employment_type: "Full-time",
+      freshness: "3d",
+    }
+  );
+  assert.strictEqual(r.pass, false);
+  assert.strictEqual(r.rejection_code, "EMPLOYMENT_TYPE_MISMATCH");
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

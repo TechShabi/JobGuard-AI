@@ -46,6 +46,13 @@ function mockAllProvidersFail(axios) {
 async function run() {
   console.log("discover() — end-to-end");
   {
+    // These tests specifically exercise the Jobicy/Himalayas/Remotive
+    // provider registration path, which is opt-in-only now that OpenAI web
+    // search is the default primary discovery mechanism (product-spec
+    // section 5). PROVIDERS is computed once at module load, so the env
+    // var must be set BEFORE the fresh require below.
+    process.env.ENABLE_JOB_API_PROVIDERS = "true";
+    delete require.cache[require.resolve(path.join(SRC, "services/opportunityDiscoveryService"))];
     const axios = require("axios");
     const { discover } = require(path.join(SRC, "services/opportunityDiscoveryService"));
 
@@ -73,13 +80,12 @@ async function run() {
       }
     });
 
-    await test("all providers fail + NOT production → sample status, samples clearly labeled", async () => {
+    await test("all providers fail + NOT production → still unavailable (development-sample fallback is fully disabled in this build, never partially — see opportunityDiscoveryService.js header)", async () => {
       mockAllProvidersFail(axios);
       delete process.env.NODE_ENV;
       const { opportunities, meta } = await discover({ role: "React Developer", skills: [], location: "", remote_preference: "any", experience: "" });
-      assert.strictEqual(meta.discovery_status, "sample");
-      assert.ok(opportunities.length > 0);
-      assert.ok(opportunities.every((o) => o.is_development_sample === true), "every fallback row must be clearly flagged as a sample");
+      assert.strictEqual(meta.discovery_status, "unavailable");
+      assert.strictEqual(opportunities.length, 0, "no sample fallback exists to substitute here — that code path is commented out, not merely gated");
     });
 
     await test("partial failure (2 succeed, 1 fails) → still live_provider, with an honest partial-coverage note", async () => {
@@ -91,6 +97,8 @@ async function run() {
       assert.strictEqual(opportunities.length, 2);
       assert.ok(meta.note && meta.note.includes("himalayas"), "note should name the failed source");
     });
+
+    delete process.env.ENABLE_JOB_API_PROVIDERS;
   }
 
   console.log("opportunityVerificationService (existing, untouched — reused as-is)");

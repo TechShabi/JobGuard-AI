@@ -7,9 +7,10 @@ const { discover } = require("../services/opportunityDiscoveryService");
 const { processDiscovered } = require("../services/opportunityVerificationService");
 const { matchesSearchCriteria } = require("../services/opportunitySearchMatchService");
 const { rankByRelevance } = require("../services/opportunityRelevanceService");
-const { explainOpportunityRelevance } = require("../services/geminiService");
+const { explainOpportunityRelevance } = require("../services/aiService");
 const { nextBestAction } = require("../services/recommendationService");
 const { consumeCareerSession } = require("../middleware/careerSession");
+const careerFocusService = require("../services/careerFocusService");
 
 // Filter-order cost control (product-spec section 15): never send every
 // discovered/verified candidate to Gemini. Only the top N, by deterministic
@@ -45,17 +46,31 @@ function parseSkills(skills) {
  */
 exports.findOpportunities = async (req, res) => {
   try {
-    const role = (req.body.role || "").trim();
+    // Career Focus context (product-spec sections 26-30, 37): an
+    // explicitly requested focus wins; otherwise fall back to the user's
+    // active focus. Purely additive — it only FILLS IN fields the request
+    // itself left blank, it never overrides something the user actually
+    // typed into the search form this time.
+    const focus = req.user?.id
+      ? await careerFocusService.resolveFocusForRequest(req.user.id, req.body.career_focus_id)
+      : null;
+    const focusContext = careerFocusService.toPromptContext(focus);
+
+    const role = (req.body.role || focusContext?.target_role || "").trim();
     if (!role) {
       return res.status(400).json({ success: false, message: "Target role is required." });
     }
 
+    const requestedSkills = parseSkills(req.body.skills);
+
     const query = {
       role,
-      skills: parseSkills(req.body.skills),
-      location: (req.body.location || "").trim(),
-      remote_preference: req.body.remote_preference || "any",
-      experience: req.body.experience || "",
+      skills: requestedSkills.length ? requestedSkills : focusContext?.skills || [],
+      location: (req.body.location || focusContext?.location || "").trim(),
+      remote_preference: req.body.remote_preference || focusContext?.work_mode || "any",
+      experience: req.body.experience || focusContext?.experience_level || "",
+      employment_type: req.body.employment_type || "",
+      freshness: req.body.freshness || "any",
       preferences: req.body.preferences || {},
     };
 
@@ -82,7 +97,17 @@ exports.findOpportunities = async (req, res) => {
 
     // Admin/debug observability (product-spec section 24) — tally rejection
     // reasons without storing full per-job blobs. Never shown to end users.
-    const rejectionBreakdown = { ROLE_MISMATCH: 0, SKILL_MISMATCH: 0, REMOTE_MISMATCH: 0, LOCATION_MISMATCH: 0, LOCATION_INSUFFICIENT: 0 };
+    const rejectionBreakdown = {
+      ROLE_MISMATCH: 0,
+      SKILL_MISMATCH: 0,
+      REMOTE_MISMATCH: 0,
+      LOCATION_MISMATCH: 0,
+      LOCATION_INSUFFICIENT: 0,
+      EXPERIENCE_MISMATCH: 0,
+      EMPLOYMENT_TYPE_MISMATCH: 0,
+      FRESHNESS_MISMATCH: 0,
+      FRESHNESS_UNKNOWN: 0,
+    };
     for (const r of constraintRejected) {
       if (rejectionBreakdown[r.rejection_code] !== undefined) rejectionBreakdown[r.rejection_code] += 1;
     }
@@ -123,12 +148,17 @@ exports.findOpportunities = async (req, res) => {
     if (req.user?.id) {
       searchRecord = await OpportunitySearch.create({
         user_id: req.user.id,
+        career_focus_id: focus?.id || null,
         role: query.role,
         skills: query.skills,
         location: query.location || null,
         remote_preference: query.remote_preference,
         experience: query.experience || null,
-        preferences: query.preferences,
+        preferences: {
+          ...query.preferences,
+          employment_type: query.employment_type || null,
+          freshness: query.freshness || "any",
+        },
         results_snapshot: ranked.slice(0, 20),
         provider: meta.providers_used?.find((p) => p.is_live && p.count > 0)?.id || null,
         is_live: !!meta.is_live,
@@ -168,6 +198,7 @@ exports.findOpportunities = async (req, res) => {
       });
 
       await consumeCareerSession(req);
+      if (focus) await careerFocusService.touchLastUsed(focus);
     }
 
     return res.json({
@@ -190,6 +221,7 @@ exports.findOpportunities = async (req, res) => {
           ...meta,
           verified_count: trustedOnly.length,
           search_id: searchRecord?.id || null,
+          career_focus_id: focus?.id || null,
         },
       },
     });

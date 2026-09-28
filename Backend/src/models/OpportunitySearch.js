@@ -15,6 +15,13 @@ const OpportunitySearch = sequelize.define(
       type: DataTypes.INTEGER,
       allowNull: false,
     },
+    // Nullable — older rows and searches made with no active Career Focus
+    // have none. When present, ties this search back to the Career Focus
+    // whose context (role/skills/location) informed it.
+    career_focus_id: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+    },
     role: {
       type: DataTypes.STRING,
       allowNull: false,

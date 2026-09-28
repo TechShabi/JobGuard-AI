@@ -216,16 +216,103 @@ function matchesRemoteAndLocation(query, opp) {
   return { remote: { pass: true, reason: null }, location: { pass: true, reason: null } };
 }
 
+// ── Experience level ─────────────────────────────────────────────────────
+// Only ever a HARD reject on a genuinely OPPOSING bucket (e.g. query wants
+// Senior, listing is clearly Internship). A listing whose level can't be
+// determined is UNKNOWN, never a mismatch (product-spec section 15/13):
+// omission is not evidence of disqualification.
+const EXPERIENCE_BUCKETS = {
+  internship: ["internship", "intern", "trainee"],
+  entry: ["entry level", "entry-level", "entrylevel", "fresher", "graduate", "0-1"],
+  junior: ["junior", "jr", "associate"],
+  mid: ["mid level", "mid-level", "midlevel", "intermediate", "2-4"],
+  senior: ["senior", "sr", "5+", "experienced"],
+  lead: ["lead", "principal", "staff", "manager", "head of"],
+};
+function normalizeExperience(value) {
+  const v = ` ${String(value || "").toLowerCase().trim()} `;
+  if (!v.trim() || v.includes("any")) return null;
+  for (const [bucket, keywords] of Object.entries(EXPERIENCE_BUCKETS)) {
+    if (keywords.some((k) => v.includes(k))) return bucket;
+  }
+  return null; // unrecognized text — treated as unknown, not a mismatch
+}
+function matchesExperience(query, opp) {
+  const qLevel = normalizeExperience(query.experience);
+  if (!qLevel) return { pass: true, reason: null }; // no (interpretable) constraint requested
+  const oppLevel = normalizeExperience(opp.seniority);
+  if (!oppLevel) return { pass: true, reason: null }; // source didn't say — unknown, never auto-rejected
+  if (oppLevel === qLevel) return { pass: true, reason: null };
+  return { pass: false, reason: "EXPERIENCE_MISMATCH" };
+}
+
+// ── Employment type ──────────────────────────────────────────────────────
+// Same "unknown is not a mismatch" principle: never fabricated on either
+// side, so a source that didn't state one can't be confidently rejected.
+function normalizeEmploymentType(value) {
+  const v = String(value || "").toLowerCase().replace(/[^a-z]/g, "");
+  if (!v || v === "any") return null;
+  if (v.includes("fulltime")) return "fulltime";
+  if (v.includes("parttime")) return "parttime";
+  if (v.includes("contract") || v.includes("freelance")) return "contract";
+  if (v.includes("intern")) return "internship";
+  if (v.includes("temp")) return "temporary";
+  return "other";
+}
+function matchesEmploymentType(query, opp) {
+  const q = normalizeEmploymentType(query.employment_type);
+  if (!q) return { pass: true, reason: null };
+  const o = normalizeEmploymentType(opp.employment_type);
+  if (!o) return { pass: true, reason: null }; // source didn't say — unknown, never auto-rejected
+  if (q === o) return { pass: true, reason: null };
+  return { pass: false, reason: "EMPLOYMENT_TYPE_MISMATCH" };
+}
+
+// ── Freshness ─────────────────────────────────────────────────────────────
+// The one filter where "unknown" IS treated as a rejection when the user
+// explicitly asked for a freshness window (product-spec section 17: "an
+// unknown posting date must not be treated as a confirmed match" for
+// strict freshness searches) — deliberately the opposite default from
+// experience/employment type above, per the product spec's own distinction.
+const FRESHNESS_WINDOWS_DAYS = {
+  "24h": 1, last24h: 1, last_24_hours: 1, "1d": 1,
+  "3d": 3, last3d: 3, last_3_days: 3,
+  "7d": 7, last7d: 7, last_7_days: 7,
+};
+function matchesFreshness(query, opp) {
+  const key = String(query.freshness || "").toLowerCase().replace(/\s+/g, "_");
+  if (!key || key === "any") return { pass: true, reason: null };
+  const windowDays = FRESHNESS_WINDOWS_DAYS[key];
+  if (!windowDays) return { pass: true, reason: null }; // unrecognized value — don't punish on a value we can't interpret
+
+  if (!opp.posted_at) return { pass: false, reason: "FRESHNESS_UNKNOWN" };
+  const posted = new Date(opp.posted_at);
+  if (Number.isNaN(posted.getTime())) return { pass: false, reason: "FRESHNESS_UNKNOWN" };
+
+  const ageMs = Date.now() - posted.getTime();
+  const ok = ageMs >= 0 && ageMs <= windowDays * 24 * 60 * 60 * 1000;
+  return { pass: ok, reason: ok ? null : "FRESHNESS_MISMATCH" };
+}
+
 /**
- * Authoritative AND-gate. Every specified constraint must pass.
+ * Authoritative AND-gate. Every specified constraint must pass. Only
+ * constraints the user actually specified participate (product-spec
+ * section 18) — matchesExperience/matchesEmploymentType/matchesFreshness
+ * all pass through as { pass: true } when the corresponding query field is
+ * absent/"any", exactly like matchesRole/matchesSkills already do.
  */
 function matchesSearchCriteria(opp, query = {}) {
   const role = matchesRole(query, opp);
   const skills = matchesSkills(query, opp);
   const { remote, location } = matchesRemoteAndLocation(query, opp);
+  const experience = matchesExperience(query, opp);
+  const employment_type = matchesEmploymentType(query, opp);
+  const freshness = matchesFreshness(query, opp);
 
-  const reasons = { role, skills, remote, location };
-  const failed = [role, skills, remote, location].find((r) => !r.pass);
+  const reasons = { role, skills, remote, location, experience, employment_type, freshness };
+  const failed = [role, skills, remote, location, experience, employment_type, freshness].find(
+    (r) => !r.pass
+  );
 
   return {
     pass: !failed,
@@ -241,4 +328,9 @@ module.exports = {
   skillsEquivalent,
   hasSkillEvidence,
   isLocationEligible,
+  normalizeExperience,
+  matchesExperience,
+  normalizeEmploymentType,
+  matchesEmploymentType,
+  matchesFreshness,
 };

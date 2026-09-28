@@ -27,6 +27,18 @@ const MEMBERSHIP_RANK = Object.freeze({
 });
 
 // `sessionsPerCycle: null` means unlimited.
+// `careerFocusLimit: null` means unlimited (Pro only) — see CareerFocus
+// model + careerFocusService.js. Starter and Go both cap at 1 active
+// Career Focus (product-spec sections 27/28); the tier difference between
+// them is capacity/AI depth, never the Career Focus count.
+//
+// Highlights use INHERITANCE wording (product-spec section 32) — Go/Pro
+// never repeat "Opportunity / Resume / Interview" (every plan already has
+// all three, per section 34: no arbitrary per-tool paywalls) and never
+// lead with a raw internal session number as the primary pitch (section
+// 33) — sessionsPerCycle stays available internally/in the UI's own
+// qualitative badge (see SESSION_TIER_LABEL in PricingPage.jsx) for
+// members who want the exact number, but it isn't the headline bullet.
 const MEMBERSHIPS = Object.freeze({
   [MEMBERSHIP_IDS.STARTER]: {
     id: MEMBERSHIP_IDS.STARTER,
@@ -38,12 +50,13 @@ const MEMBERSHIPS = Object.freeze({
     priceNote: "No credit card required",
     sessionsPerCycle: 20,
     cycleDays: 30,
+    careerFocusLimit: 1,
     highlights: [
-      "20 Career Sessions every month",
-      "Opportunity Verification",
-      "Resume Review",
-      "Resume Builder",
-      "Interview Practice",
+      "Opportunity — AI-verified job discovery",
+      "Resume — review & builder",
+      "Interview — AI mock practice",
+      "1 Career Focus",
+      "Core AI assistance",
     ],
     guarantee: "No signup required for basic use",
   },
@@ -57,11 +70,12 @@ const MEMBERSHIPS = Object.freeze({
     priceNote: "Billed monthly • Cancel anytime",
     sessionsPerCycle: 150,
     cycleDays: 30,
+    careerFocusLimit: 1,
     highlights: [
-      "150 Career Sessions every month",
-      "Resume Optimization",
-      "Opportunity Find & recommendations",
-      "Interview Practice & reports",
+      "Everything in Career Starter",
+      "More AI assistance",
+      "Higher usage",
+      "More recommendations & automation",
       "Saved history across every tool",
     ],
     guarantee: "Cancel anytime — access until period end",
@@ -77,11 +91,13 @@ const MEMBERSHIPS = Object.freeze({
     priceNote: "Billed monthly • Cancel anytime",
     sessionsPerCycle: null, // unlimited
     cycleDays: 30,
+    careerFocusLimit: null, // unlimited — Pro-only differentiator
     highlights: [
-      "Unlimited Career Sessions",
-      "Every available AI feature",
-      "Highest monthly capacity",
-      "Saved history across every tool",
+      "Everything in Career Go",
+      "Maximum AI assistance",
+      "Highest usage",
+      "Multiple Career Focuses",
+      "Advanced recommendations & automation",
     ],
     guarantee: "Cancel anytime — access until period end",
   },
@@ -216,6 +232,14 @@ function getFeature(featureKey) {
   return FEATURES[featureKey] || null;
 }
 
+// null => unlimited (Pro). Falls back to Starter's limit (1) for an
+// unrecognized membership id rather than accidentally granting unlimited.
+function getCareerFocusLimit(membershipId) {
+  const membership = MEMBERSHIPS[membershipId];
+  if (!membership) return MEMBERSHIPS[MEMBERSHIP_IDS.STARTER].careerFocusLimit;
+  return membership.careerFocusLimit;
+}
+
 // Friendly, career-growth-flavored upgrade copy. Never mentions tokens,
 // credits, requests, or API calls.
 function buildUpgradeMessage(featureKey, requiredMembershipId) {
@@ -246,6 +270,7 @@ module.exports = {
   isMembershipAtLeast,
   getMembership,
   getFeature,
+  getCareerFocusLimit,
   buildUpgradeMessage,
   buildSessionsExhaustedMessage,
 };

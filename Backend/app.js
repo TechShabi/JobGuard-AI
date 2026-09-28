@@ -27,7 +27,9 @@ const membershipRoutes = require("./src/routes/membershipRoutes");
 // ── Sprint 5: Opportunity Find ──
 const OpportunitySearch = require("./src/models/OpportunitySearch");
 const SavedOpportunity = require("./src/models/SavedOpportunity");
+const CareerFocus = require("./src/models/CareerFocus");
 const opportunityRoutes = require("./src/routes/opportunityRoutes");
+const careerFocusRoutes = require("./src/routes/careerFocusRoutes");
 
 // ── Sprint 6: Admin Portal ──
 const AdminAuditLog = require("./src/models/AdminAuditLog");
@@ -85,6 +87,7 @@ app.use("/api/interview", interviewRoutes);
 app.use("/api/membership", membershipRoutes);
 app.use("/api/billing", billingRoutes);
 app.use("/api/opportunity", opportunityRoutes);
+app.use("/api/career-focus", careerFocusRoutes);
 
 // Admin — auth then DB-verified admin role, then rate limit
 app.use("/api/admin", auth, admin, adminLimiter, adminRoutes);

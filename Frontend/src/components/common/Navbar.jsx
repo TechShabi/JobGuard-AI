@@ -3,6 +3,7 @@ import { Link, NavLink, useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ShieldCheck, Menu, X, LogOut, ChevronDown, Bell } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import CareerFocusSwitcher from './CareerFocusSwitcher';
 
 // Clean dropdown structure without description junk
 const TOOL_LINKS = [
@@ -228,6 +229,7 @@ export default function Navbar() {
               <div className="w-[90px] h-9 rounded-lg bg-slate-100 dark:bg-slate-900 animate-pulse" />
             ) : user ? (
               <div className="flex items-center gap-3">
+                <CareerFocusSwitcher />
                 <NotificationsMenu />
                 <NavLink 
                   to="/profile" 

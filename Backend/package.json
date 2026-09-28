@@ -9,6 +9,8 @@
     "dev": "nodemon app.js",
     "lint": "echo \"No lint configured\"",
     "test:opportunity": "node tests/opportunity-discovery.test.js && node tests/opportunity-integration.test.js && node tests/opportunity-search-match.test.js",
+    "test:ai": "node tests/ai-provider.test.js",
+    "test:career-focus": "node tests/career-focus.test.js",
     "test:admin": "node tests/admin-authorization.test.js",
     "test:membership": "node tests/membership-interest.test.js && node tests/payments-disabled-gate.test.js && node tests/starter-core-access.test.js"
   },

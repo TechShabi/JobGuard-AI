@@ -88,6 +88,8 @@ export default function OpportunityFind() {
   const [experience, setExperience] = useState(
     hasContext ? context.experience || "" : ""
   );
+  const [employmentType, setEmploymentType] = useState("");
+  const [freshness, setFreshness] = useState("any");
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -121,6 +123,8 @@ export default function OpportunityFind() {
       setLocation(last.query.location || "");
       setRemotePreference(last.query.remote_preference || "any");
       setExperience(last.query.experience || experience);
+      setEmploymentType(last.query.employment_type || "");
+      setFreshness(last.query.freshness || "any");
       if (Array.isArray(last.opportunities) && last.opportunities.length) {
         setOpportunities(last.opportunities);
         setMeta(last.meta || null);
@@ -225,6 +229,8 @@ export default function OpportunityFind() {
         location: location.trim(),
         remote_preference: remotePreference,
         experience,
+        employment_type: employmentType,
+        freshness,
       };
       const res = await findOpportunitiesService(payload);
       const data = res.data?.data || {};
@@ -520,6 +526,34 @@ export default function OpportunityFind() {
                   {EXPERIENCE_LEVELS.map((l) => (
                     <option key={l.id} value={l.label}>{l.label}</option>
                   ))}
+                </select>
+              </div>
+              <div style={{ flex: 1 }}>
+                <label className="form-label">Employment type</label>
+                <select
+                  className="centered-input"
+                  value={employmentType}
+                  onChange={(e) => setEmploymentType(e.target.value)}
+                >
+                  <option value="">Any type</option>
+                  <option value="Full-time">Full-time</option>
+                  <option value="Part-time">Part-time</option>
+                  <option value="Contract">Contract</option>
+                  <option value="Internship">Internship</option>
+                  <option value="Temporary">Temporary</option>
+                </select>
+              </div>
+              <div style={{ flex: 1 }}>
+                <label className="form-label">Freshness</label>
+                <select
+                  className="centered-input"
+                  value={freshness}
+                  onChange={(e) => setFreshness(e.target.value)}
+                >
+                  <option value="any">Any time</option>
+                  <option value="24h">Last 24 hours</option>
+                  <option value="3d">Last 3 days</option>
+                  <option value="7d">Last 7 days</option>
                 </select>
               </div>
             </div>

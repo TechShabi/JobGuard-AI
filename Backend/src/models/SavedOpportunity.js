@@ -14,6 +14,12 @@ const SavedOpportunity = sequelize.define(
       type: DataTypes.INTEGER,
       allowNull: false,
     },
+    // Nullable — which Career Focus this save belongs to, when the user
+    // had one active (Pro users may keep separate saved lists per focus).
+    career_focus_id: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+    },
     external_id: {
       // Stable id from the discovery provider / normalized result
       type: DataTypes.STRING,
